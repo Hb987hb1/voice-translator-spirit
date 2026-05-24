@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     steps:
@@ -35,18 +35,11 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
-      - name: Fix Kotlin compatibility
-        run: |
-          # 在 gradle.properties 中跳过 Kotlin 版本检查
-          echo "kotlin.compiler.skip-metadata-version-check=true" >> android/gradle.properties
-          # 或者用更兼容的 Kotlin 版本
-          echo "kotlin.version=1.9.24" >> android/gradle.properties
-
       - name: Build APK (debug)
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon -Dkotlin.compiler.skip-metadata-version-check=true
+          ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
