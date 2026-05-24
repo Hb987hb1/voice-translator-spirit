@@ -2,4 +2,4 @@
 
 语音翻译 Android App (Expo + React Native)
 
-*自动构建中...*
+构建状态: 🔄
