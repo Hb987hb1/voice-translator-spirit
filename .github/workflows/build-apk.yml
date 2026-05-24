@@ -48,12 +48,21 @@ zipStorePath=wrapper/dists
 EOF
           chmod +x gradlew
 
-      - name: Build
+      - name: Build (save log)
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon 2>&1 | tee /tmp/build.log
+          echo "exit=$?" >> /tmp/build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apk
