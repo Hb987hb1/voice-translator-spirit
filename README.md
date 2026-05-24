@@ -2,4 +2,4 @@
 
 语音翻译 Android App (Expo + React Native)
 
-构建状态: 🔄
+尝试 Gradle 8.5 构建...
