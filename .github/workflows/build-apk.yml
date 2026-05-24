@@ -34,28 +34,34 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
-      - name: Fix Gradle wrapper
+      - name: Patch Gradle wrapper to 8.2
         run: |
           cd android
-          rm -f gradle/wrapper/gradle-wrapper.properties
-          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << 'ENDOFFILE'
 distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
 networkTimeout=10000
-validateDistributionUrl=true
 zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
-EOF
+ENDOFFILE
 
-      - name: Build APK
+      - name: Build debug APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          export GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx4g"
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tail -50
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
           path: android/app/build/outputs/apk/debug/*.apk
+
+      - name: Upload APK (release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-release
+          path: android/app/build/outputs/apk/release/*.apk
