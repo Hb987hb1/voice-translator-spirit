@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: macos-13
     timeout-minutes: 60
 
     steps:
@@ -34,33 +34,26 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
-      - name: Fix Gradle wrapper to 8.2
+      - name: Set Gradle 8.2
         run: |
           cd android
           mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties << 'ENDOFFILE'
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
 distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
 distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
 networkTimeout=10000
 zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
-ENDOFFILE
+EOF
+          chmod +x gradlew
 
-      - name: Build with debug output
+      - name: Build
         run: |
           cd android
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
-          echo "=== EXIT CODE: $? ==="
-
-      - name: Show error if failed
-        if: failure()
-        run: |
-          cat android/build.log 2>/dev/null | grep -E "(FAILED|error:|BUILD FAIL|Kotlin|incompatible)" | tail -20
+          ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apk
