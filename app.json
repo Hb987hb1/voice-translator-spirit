@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "语音翻译小精灵",
+    "slug": "voice-translator-spirit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#1a1a2e"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.voicetranslator.spirit",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "语音翻译小精灵需要语音识别权限来将您的语音转换为文字",
+        "NSMicrophoneUsageDescription": "语音翻译小精灵需要麦克风权限来接收您的语音输入",
+        "NSBluetoothAlwaysUsageDescription": "用于连接蓝牙耳机播放翻译结果"
+      }
+    },
+    "android": {
+      "package": "com.voicetranslator.spirit",
+      "adaptiveIcon": {
+        "backgroundColor": "#1a1a2e"
+      },
+      "permissions": [
+        "RECORD_AUDIO",
+        "INTERNET",
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_CONNECT",
+        "BLUETOOTH_SCAN",
+        "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "WAKE_LOCK",
+        "MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "plugins": [
+      "expo-speech-recognition"
+    ]
+  }
+}
