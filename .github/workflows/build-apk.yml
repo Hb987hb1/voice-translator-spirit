@@ -35,6 +35,12 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
+      - name: Use Gradle 8.7
+        run: |
+          cd android
+          # 强制使用 Gradle 8.7（与 Kotlin 1.9 兼容）
+          ./gradlew wrapper --gradle-version 8.7
+
       - name: Build APK (debug)
         run: |
           cd android
