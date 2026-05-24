@@ -1,0 +1,49 @@
+name: Build APK (Expo)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  install-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Expo and build
+        run: |
+          npm install -g eas-cli
+          npx expo prebuild --platform android
+        env:
+          EXPO_NO_DOCTOR: 1
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-translator-spirit-apk
+          path: android/app/build/outputs/apk/release/*.apk
