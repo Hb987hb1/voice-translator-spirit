@@ -1,4 +1,4 @@
-name: Build APK (Expo)
+name: Build APK
 
 on:
   push:
@@ -7,28 +7,26 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 18
 
-      - name: Setup Java
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: 17
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           rm -f package-lock.json
-          rm -rf android
           npm install --legacy-peer-deps
 
       - name: Prebuild
@@ -36,24 +34,17 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
-      - name: Set Kotlin compiler to 2.0.21
+      - name: Install Gradle 7.6
         run: |
-          # 通过 gradle.properties 指定 Kotlin 版本和跳过元数据检查
-          cat >> android/gradle.properties << 'EOF'
-kotlin.compiler.skip-metadata-version-check=true
-kotlin.code.style=official
-android.useAndroidX=true
-android.enableJetifier=true
-newArchEnabled=true
-hermesEnabled=true
-EOF
+          wget -q https://services.gradle.org/distributions/gradle-7.6-bin.zip
+          unzip -q gradle-7.6-bin.zip
+          echo "GRADLE_HOME=$PWD/gradle-7.6" >> $GITHUB_ENV
+          echo "$PWD/gradle-7.6/bin" >> $GITHUB_PATH
 
-      - name: Build APK with gradle and skip metadata check
+      - name: Build APK
         run: |
           cd android
-          chmod +x gradlew
-          export KOTLIN_DAEMON_JVM_ARGS="-Dkotlin.compiler.skip-metadata-version-check=true"
-          ./gradlew assembleDebug --no-daemon             -Dorg.gradle.jvmargs="-Xmx4g -Dkotlin.compiler.skip-metadata-version-check=true"             -Pkotlin.compiler.skip-metadata-version-check=true
+          gradle assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
