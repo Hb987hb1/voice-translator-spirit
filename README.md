@@ -1,4 +1,3 @@
-# 语音翻译小精灵
+# Voice Translator
 
-语音翻译 Android App
-.
+Building APK...
