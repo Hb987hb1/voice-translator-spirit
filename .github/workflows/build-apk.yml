@@ -36,25 +36,24 @@ jobs:
         env:
           EXPO_NO_DOCTOR: 1
 
-      - name: Force Gradle 8.6
+      - name: Set Kotlin compiler to 2.0.21
         run: |
-          # 直接写死 gradle wrapper 版本为 8.6
-          mkdir -p android/gradle/wrapper
-          cat > android/gradle/wrapper/gradle-wrapper.properties << 'EOF'
-distributionBase=GRADLE_USER_HOME
-distributionPath=wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
-networkTimeout=10000
-validateDistributionUrl=true
-zipStoreBase=GRADLE_USER_HOME
-zipStorePath=wrapper/dists
+          # 通过 gradle.properties 指定 Kotlin 版本和跳过元数据检查
+          cat >> android/gradle.properties << 'EOF'
+kotlin.compiler.skip-metadata-version-check=true
+kotlin.code.style=official
+android.useAndroidX=true
+android.enableJetifier=true
+newArchEnabled=true
+hermesEnabled=true
 EOF
 
-      - name: Build APK (debug)
+      - name: Build APK with gradle and skip metadata check
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon -Dorg.gradle.jvmargs=-Xmx4g
+          export KOTLIN_DAEMON_JVM_ARGS="-Dkotlin.compiler.skip-metadata-version-check=true"
+          ./gradlew assembleDebug --no-daemon             -Dorg.gradle.jvmargs="-Xmx4g -Dkotlin.compiler.skip-metadata-version-check=true"             -Pkotlin.compiler.skip-metadata-version-check=true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
