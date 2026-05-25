@@ -23,6 +23,7 @@
       "permissions": [
         "RECORD_AUDIO",
         "INTERNET",
+        "CAMERA",
         "BLUETOOTH",
         "BLUETOOTH_ADMIN",
         "BLUETOOTH_CONNECT",
@@ -35,7 +36,7 @@
         "SYSTEM_ALERT_WINDOW",
         "FOREGROUND_SERVICE_DATA_SYNC"
       ],
-      "versionCode": 14
+      "versionCode": 15
     },
     "plugins": [
       "expo-speech-recognition"
