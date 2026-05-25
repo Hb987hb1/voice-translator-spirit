@@ -36,11 +36,10 @@
         "SYSTEM_ALERT_WINDOW",
         "FOREGROUND_SERVICE_DATA_SYNC"
       ],
-      "versionCode": 21
+      "versionCode": 22
     },
     "plugins": [
-      "expo-speech-recognition",
-      "./modules/voice-translator"
+      "expo-speech-recognition"
     ],
     "extra": {
       "eas": {
