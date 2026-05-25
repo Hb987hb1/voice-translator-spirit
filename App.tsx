@@ -13,16 +13,15 @@ import {
   Switch,
   AppState,
   Dimensions,
-  NativeModules,
   NativeEventEmitter,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
+import { requireNativeModule } from 'expo-modules-core';
 
 // ============================================================
-// 译通翻译 v4.0
-// 自定义 Android 原生模块 VoiceTranslator
-// 直接调用 Android SpeechRecognizer
+// 译通翻译 v4.1
+// 使用 requireNativeModule 直接获取 native 语音模块
 // ============================================================
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -48,12 +47,17 @@ async function translateText(text: string, source: string, target: string): Prom
   } catch { return text; }
 }
 
-// ---- 自定义原生模块 ----
-const VT = NativeModules.VoiceTranslator;
-let VTEvent: NativeEventEmitter | null = null;
+// ---- 获取 native 语音模块 ----
+let SRModule: any = null;
+let SREvents: NativeEventEmitter | null = null;
 try {
-  if (VT) VTEvent = new NativeEventEmitter(VT);
-} catch {}
+  SRModule = requireNativeModule('ExpoSpeechRecognition');
+  if (SRModule) {
+    SREvents = new NativeEventEmitter(SRModule);
+  }
+} catch (e) {
+  console.warn('ExpoSpeechRecognition native module not found:', e);
+}
 
 export default function App() {
   const [isListening, setIsListening] = useState(false);
@@ -116,76 +120,50 @@ export default function App() {
   }, []);
 
   // ---- 语音识别 ----
-  const startListen = useCallback(() => {
-    if (!VT) { setStatusText('❌ 语音模块未加载'); return; }
-
-    // 先检查权限
-    VT.checkPermission().then((granted: boolean) => {
-      if (granted) {
-        doStart();
-      } else {
-        // 请求权限
-        VT.requestPermission().then((ok: boolean) => {
-          if (ok) doStart();
-          else Alert.alert('需要权限', '请允许麦克风权限');
-        }).catch(() => doStart());
-      }
-    });
+  const clearSubs = useCallback(() => {
+    subsRef.current.forEach((s: any) => { try { s.remove(); } catch {} });
+    subsRef.current = [];
   }, []);
 
-  const doStart = useCallback(() => {
-    if (!VT) return;
+  const startListen = useCallback(() => {
+    if (!SRModule || !SREvents) {
+      setStatusText('❌ 语音模块未加载');
+      return;
+    }
 
-    // 清除旧的监听器
-    subsRef.current.forEach((s: any) => s.remove());
-    subsRef.current = [];
-
+    clearSubs();
     setIsListening(true);
     isListenRef.current = true;
     setStatusText('🔴 聆听中...说"停"停止');
 
-    // 监听事件
-    const onResult = VTEvent?.addListener('onResult', (e: any) => {
-      const text = e?.text || '';
+    // 注册事件
+    const onR = SREvents.addListener('result', (e: any) => {
+      const text = e?.results?.[0]?.transcript || '';
       const isFinal = e?.isFinal;
-
       if (isFinal && text.trim()) {
-        // 检查停止命令
         const lower = text.trim().toLowerCase();
-        if (lower === '停' || lower === '停止' || lower === 'ting') {
-          stopListen();
-          return;
-        }
+        if (lower === '停' || lower === '停止') { stopListen(); return; }
         handleTranslate(text);
       } else if (!isFinal && text.trim()) {
         setPartialText(text);
       }
     });
 
-    const onError = VTEvent?.addListener('onError', (e: any) => {
-      const msg = e?.message || '';
-      if (msg.includes('未识别') || msg.includes('超时')) return;
-      console.warn('VT Error:', msg);
+    const onE = SREvents.addListener('error', () => {});
+    const onEnd = SREvents.addListener('end', () => {
+      clearSubs();
+      if (isListenRef.current) {
+        setTimeout(startListen, 100);
+      }
     });
 
-    const onEnd = VTEvent?.addListener('onEnd', () => {
-      // Android 每次结果后自动结束，自动重启实现持续翻译
-      setTimeout(() => {
-        if (isListenRef.current && VT) {
-          doStart();
-        }
-      }, 100);
-    });
+    subsRef.current = [onR, onE, onEnd];
 
-    subsRef.current = [onResult, onError, onEnd].filter(Boolean);
-
-    // 启动识别
     try {
-      VT.startListening({
-        language: sLang.current === 'auto' ? 'zh-CN' : sLang.current,
-        continuous: true,
+      SRModule.start({
+        lang: sLang.current === 'auto' ? 'zh-CN' : sLang.current,
         interimResults: true,
-        wakewordMode: false,
+        continuous: true,
       });
     } catch (e: any) {
       setIsListening(false);
@@ -195,197 +173,152 @@ export default function App() {
   }, []);
 
   const stopListen = useCallback(() => {
-    subsRef.current.forEach((s: any) => s.remove());
-    subsRef.current = [];
-    try { VT?.stopListening?.(); } catch {}
+    clearSubs();
+    try { SRModule?.stop?.(); } catch {}
+    try { SRModule?.abort?.(); } catch {}
     setIsListening(false);
     isListenRef.current = false;
     setPartialText('');
     setStatusText('⏹️ 已停止');
-  }, []);
+  }, [clearSubs]);
 
   const handleTranslate = useCallback((text: string) => {
     setOriginalText(text);
     setPartialText('');
     setStatusText('🔍 翻译中...');
-
     translateText(text, sLang.current, tLang.current).then((res) => {
       setTranslatedText(res);
-      setStatusText('🔴 翻译完成');
+      setStatusText('✅ 翻译完成');
       if (speakRef.current && res && res !== text) {
-        Speech.speak(res, {
-          language: tLang.current === 'zh-CN' ? 'zh-CN' : tLang.current,
-          rate: 0.9,
-        });
+        Speech.speak(res, { language: tLang.current === 'zh-CN' ? 'zh-CN' : tLang.current, rate: 0.9 });
       }
-      setHistory(prev => [{
-        id: Date.now(), original: text, translated: res,
-        source: sLang.current, target: tLang.current, timestamp: Date.now(),
-      }, ...prev].slice(0, 50));
+      setHistory(prev => [{ id: Date.now(), original: text, translated: res, source: sLang.current, target: tLang.current, timestamp: Date.now() }, ...prev].slice(0, 50));
     });
   }, []);
 
-  // ---- 按钮 ----
   const onMain = useCallback(() => {
-    if (isListening) { stopListen(); }
-    else { startListen(); }
+    if (isListening) stopListen();
+    else startListen();
   }, [isListening, stopListen, startListen]);
 
-  // ---- 语言 ----
   const swap = useCallback(() => {
     if (sourceLang !== 'auto') { setSourceLang(targetLang); setTargetLang(sourceLang); }
   }, [sourceLang, targetLang]);
-  const gl = (c: string) => LANGUAGES[c] || c;
 
-  const Picker = ({ visible, onClose, onSelect, excludeAuto }: { visible: boolean; onClose: () => void; onSelect: (c: string) => void; excludeAuto: boolean }) => {
-    if (!visible) return null;
-    const codes = excludeAuto ? LANG_CODES.filter(c => c !== 'auto') : LANG_CODES;
+  const Picker = (props: { visible: boolean; onClose: () => void; onSelect: (c: string) => void; excludeAuto: boolean }) => {
+    if (!props.visible) return null;
+    const codes = props.excludeAuto ? LANG_CODES.filter(c => c !== 'auto') : LANG_CODES;
     return (
-      <View style={st.overlay}>
-        <View style={st.pickerBox}>
-          <Text style={st.pickerTitle}>选择语言</Text>
-          <ScrollView style={st.pickerList}>
-            {codes.map(code => (
-              <TouchableOpacity key={code} style={st.pickerItem} onPress={() => { onSelect(code); onClose(); }}>
-                <Text style={st.pickerText}>{LANGUAGES[code]}</Text>
-                <Text style={st.pickerCode}>{code}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <TouchableOpacity style={st.pickerClose} onPress={onClose}><Text style={st.pickerCloseText}>关闭</Text></TouchableOpacity>
-        </View>
-      </View>
+      <View style={s.over}><View style={s.pb}>
+        <Text style={s.pt}>选择语言</Text>
+        <ScrollView style={s.pl}>{codes.map(code => (
+          <TouchableOpacity key={code} style={s.pi} onPress={() => { props.onSelect(code); props.onClose(); }}>
+            <Text style={s.pit}>{LANGUAGES[code]}</Text><Text style={s.pic}>{code}</Text>
+          </TouchableOpacity>
+        ))}</ScrollView>
+        <TouchableOpacity style={s.pc} onPress={props.onClose}><Text style={s.pct}>关闭</Text></TouchableOpacity>
+      </View></View>
     );
   };
 
   return (
-    <SafeAreaView style={st.c}>
+    <SafeAreaView style={s.c}>
       <StatusBar style="light" />
-
       {showAnimal && (
-        <View style={st.ao} pointerEvents="none" key={animKey.current}>
-          <Animated.View style={[st.aw, { transform: [{ translateX: animalX }] }]}>
-            <Text style={st.ae}>{animal}</Text>
+        <View style={s.ao} pointerEvents="none" key={animKey.current}>
+          <Animated.View style={[s.aw, { transform: [{ translateX: animalX }] }]}>
+            <Text style={s.ae}>{animal}</Text>
           </Animated.View>
         </View>
       )}
-
-      <View style={st.h}>
-        <View style={st.tr}>
-          <Animated.Text style={[st.si, { opacity: pulse, transform: [{ scale: pulse }] }]}>{spirit}</Animated.Text>
+      <View style={s.h}>
+        <View style={s.tr}>
+          <Animated.Text style={[s.si, { opacity: pulse, transform: [{ scale: pulse }] }]}>{spirit}</Animated.Text>
           <View>
-            <Text style={st.t}>译通翻译</Text>
-            <Text style={st.su}>语音翻译 · 说"停"停止</Text>
+            <Text style={s.t}>译通翻译</Text>
+            <Text style={s.sub}>语音翻译 · 说"停"停止</Text>
           </View>
         </View>
-        <Text style={st.st}>{statusText}</Text>
+        <Text style={s.st}>{statusText}</Text>
       </View>
-
-      <ScrollView style={st.s} contentContainerStyle={st.si2}>
-        <TouchableOpacity style={[st.b, isListening && st.ba]} onPress={onMain} activeOpacity={0.7}>
-          <Text style={st.bi}>{isListening ? '🔴' : '🎤'}</Text>
-          <Text style={st.bt}>{isListening ? '点击停止\n说"停"也可停止' : '点击开始翻译'}</Text>
+      <ScrollView style={s.sc} contentContainerStyle={s.sci}>
+        <TouchableOpacity style={[s.b, isListening && s.ba]} onPress={onMain} activeOpacity={0.7}>
+          <Text style={s.bi}>{isListening ? '🔴' : '🎤'}</Text>
+          <Text style={s.bt}>{isListening ? '点击停止\n说"停"也可停止' : '点击开始翻译'}</Text>
         </TouchableOpacity>
-
-        <View style={st.cd}>
-          <Text style={st.ct}>🎯 使用说明</Text>
-          {[['🎤', '点击按钮开始语音识别'], ['🔊', '翻译结果自动朗读'], ['⏹️', '说"停"或点按钮停止'], ['🐱', '退出后小动物跑过屏幕']].map(([ico, txt], i) => (
-            <View key={i} style={st.hr}><Text>{ico}</Text><Text style={st.ht}>{txt}</Text></View>
+        <View style={s.cd}><Text style={s.ct}>🎯 使用说明</Text>
+          {[['🎤','点击开始语音翻译'],['🔊','结果自动朗读'],['⏹️','说"停"停止'],['🐱','退出后小动物跑过屏幕']].map(([ico,txt],i)=>(
+            <View key={i} style={s.hr}><Text>{ico}</Text><Text style={s.ht}>{txt}</Text></View>
           ))}
         </View>
-
-        {partialText ? <View style={st.cd}><Text style={st.ct}>🎤 正在听...</Text><Text style={st.pt}>{partialText}</Text></View> : null}
-
+        {partialText ? <View style={s.cd}><Text style={s.ct}>🎤 正在听...</Text><Text style={s.pt}>{partialText}</Text></View> : null}
         {originalText ? (
-          <View style={st.cd}>
-            <Text style={st.ct}>📝 翻译结果</Text>
-            <View><Text style={st.tl}>原文</Text><Text style={st.tt}>{originalText}</Text></View>
-            <View style={st.d} />
-            <View><Text style={st.tl}>译文</Text><Text style={[st.tt, st.trr]}>{translatedText}</Text></View>
+          <View style={s.cd}>
+            <Text style={s.ct}>📝 翻译结果</Text>
+            <View><Text style={s.tl}>原文</Text><Text style={s.tt}>{originalText}</Text></View>
+            <View style={s.d} />
+            <View><Text style={s.tl}>译文</Text><Text style={[s.tt, s.trr]}>{translatedText}</Text></View>
           </View>
         ) : null}
-
-        <View style={st.cd}>
-          <Text style={st.ct}>🌐 语言设置</Text>
-          <View style={st.lr}>
-            <TouchableOpacity style={st.ls} onPress={() => setShowSourcePicker(true)}>
-              <Text style={st.ll}>源语言</Text><Text style={st.lv}>{gl(sourceLang)}</Text>
+        <View style={s.cd}><Text style={s.ct}>🌐 语言设置</Text>
+          <View style={s.lr}>
+            <TouchableOpacity style={s.ls} onPress={() => setShowSourcePicker(true)}>
+              <Text style={s.ll}>源语言</Text><Text style={s.lv}>{LANGUAGES[sourceLang] || sourceLang}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={st.sb} onPress={swap}><Text>⇄</Text></TouchableOpacity>
-            <TouchableOpacity style={st.ls} onPress={() => setShowTargetPicker(true)}>
-              <Text style={st.ll}>目标语言</Text><Text style={st.lv}>{gl(targetLang)}</Text>
+            <TouchableOpacity style={s.sb} onPress={swap}><Text>⇄</Text></TouchableOpacity>
+            <TouchableOpacity style={s.ls} onPress={() => setShowTargetPicker(true)}>
+              <Text style={s.ll}>目标语言</Text><Text style={s.lv}>{LANGUAGES[targetLang] || targetLang}</Text>
             </TouchableOpacity>
           </View>
         </View>
-
-        <View style={st.cd}>
-          <Text style={st.ct}>⚙️ 设置</Text>
-          <View style={st.sr}><Text>朗读结果</Text>
-            <Switch value={speakResult} onValueChange={setSpeakResult} trackColor={{ false: '#333', true: '#4a9eff' }} thumbColor="#fff" />
+        <View style={s.cd}><Text style={s.ct}>⚙️ 设置</Text>
+          <View style={s.sr}><Text>朗读结果</Text>
+            <Switch value={speakResult} onValueChange={setSpeakResult} trackColor={{false:'#333',true:'#4a9eff'}} thumbColor="#fff" />
           </View>
         </View>
-
         {history.length > 0 && (
-          <View style={st.cd}>
-            <Text style={st.ct}>📋 翻译历史</Text>
-            {history.slice(0, 5).map(item => (
-              <View key={item.id} style={st.hi}>
-                <Text style={st.ho} numberOfLines={1}>{item.original}</Text>
-                <Text style={st.htr} numberOfLines={1}>{item.translated}</Text>
-              </View>
+          <View style={s.cd}><Text style={s.ct}>📋 翻译历史</Text>
+            {history.slice(0,5).map(item => (
+              <View key={item.id} style={s.hi}><Text style={s.ho} numberOfLines={1}>{item.original}</Text><Text style={s.htr} numberOfLines={1}>{item.translated}</Text></View>
             ))}
           </View>
         )}
       </ScrollView>
-
-      <Picker visible={showSourcePicker} onClose={() => setShowSourcePicker(false)} onSelect={c => setSourceLang(c)} excludeAuto={false} />
-      <Picker visible={showTargetPicker} onClose={() => setShowTargetPicker(false)} onSelect={c => setTargetLang(c)} excludeAuto={true} />
+      <Picker visible={showSourcePicker} onClose={()=>setShowSourcePicker(false)} onSelect={c=>setSourceLang(c)} excludeAuto={false} />
+      <Picker visible={showTargetPicker} onClose={()=>setShowTargetPicker(false)} onSelect={c=>setTargetLang(c)} excludeAuto={true} />
     </SafeAreaView>
   );
 }
 
-const st = StyleSheet.create({
-  c: { flex: 1, backgroundColor: '#1a1a2e' },
-  ao: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 9999 },
-  aw: { position: 'absolute', bottom: 100 },
-  ae: { fontSize: 48 },
-  h: { paddingTop: Platform.OS === 'android' ? 40 : 20, paddingHorizontal: 20, paddingBottom: 10 },
-  tr: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  si: { fontSize: 40 },
-  t: { fontSize: 24, fontWeight: 'bold', color: '#dedeff' },
-  su: { fontSize: 13, color: '#8888aa', marginTop: 2 },
-  st: { fontSize: 14, color: '#4a9eff', marginTop: 8 },
-  s: { flex: 1 },
-  si2: { padding: 16, gap: 12 },
-  b: { backgroundColor: '#222244', borderRadius: 16, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(74,158,255,0.3)' },
-  ba: { borderColor: '#ff4a6a', backgroundColor: '#2a1a2e' },
-  bi: { fontSize: 48, marginBottom: 8 },
-  bt: { fontSize: 16, color: '#dedeff', textAlign: 'center', lineHeight: 22 },
-  cd: { backgroundColor: '#16213e', borderRadius: 16, padding: 16 },
-  ct: { fontSize: 15, fontWeight: 'bold', color: '#dedeff', marginBottom: 12 },
-  hr: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5, gap: 10 },
-  ht: { fontSize: 14, color: '#dedeff' },
-  pt: { fontSize: 18, color: '#ffcc4a', fontStyle: 'italic' },
-  tl: { fontSize: 12, color: '#8888aa', marginBottom: 3 },
-  tt: { fontSize: 16, color: '#dedeff', lineHeight: 22 },
-  trr: { color: '#4affaa', fontWeight: '500' },
-  d: { height: 1, backgroundColor: 'rgba(255,255,255,0.1)', marginVertical: 8 },
-  lr: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  ls: { flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 12 },
-  ll: { fontSize: 12, color: '#8888aa', marginBottom: 4 },
-  lv: { fontSize: 15, color: '#dedeff', fontWeight: '500' },
-  sb: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#4a9eff', alignItems: 'center', justifyContent: 'center' },
-  sr: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
-  hi: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
-  ho: { fontSize: 14, color: '#8888aa' },
-  htr: { fontSize: 14, color: '#4affaa', marginTop: 2 },
-  overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', zIndex: 999 },
-  pickerBox: { backgroundColor: '#16213e', borderRadius: 20, width: '85%', maxHeight: '70%', padding: 20 },
-  pickerTitle: { fontSize: 18, fontWeight: 'bold', color: '#dedeff', marginBottom: 12, textAlign: 'center' },
-  pickerList: { maxHeight: 400 },
-  pickerItem: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
-  pickerText: { fontSize: 16, color: '#dedeff' },
-  pickerCode: { fontSize: 12, color: '#8888aa' },
-  pickerClose: { marginTop: 12, alignItems: 'center', padding: 12, backgroundColor: '#4a9eff', borderRadius: 10 },
-  pickerCloseText: { fontSize: 16, color: '#fff', fontWeight: '600' },
+const s = StyleSheet.create({
+  c:{flex:1,backgroundColor:'#1a1a2e'}, ao:{position:'absolute',top:0,left:0,right:0,bottom:0,backgroundColor:'rgba(0,0,0,0.5)',zIndex:9999},
+  aw:{position:'absolute',bottom:100}, ae:{fontSize:48},
+  h:{paddingTop:Platform.OS==='android'?40:20,paddingHorizontal:20,paddingBottom:10},
+  tr:{flexDirection:'row',alignItems:'center',gap:12}, si:{fontSize:40},
+  t:{fontSize:24,fontWeight:'bold',color:'#dedeff'}, sub:{fontSize:13,color:'#8888aa',marginTop:2},
+  st:{fontSize:14,color:'#4a9eff',marginTop:8},
+  sc:{flex:1}, sci:{padding:16,gap:12},
+  b:{backgroundColor:'#222244',borderRadius:16,padding:24,alignItems:'center',borderWidth:1,borderColor:'rgba(74,158,255,0.3)'},
+  ba:{borderColor:'#ff4a6a',backgroundColor:'#2a1a2e'}, bi:{fontSize:48,marginBottom:8},
+  bt:{fontSize:16,color:'#dedeff',textAlign:'center',lineHeight:22},
+  cd:{backgroundColor:'#16213e',borderRadius:16,padding:16},
+  ct:{fontSize:15,fontWeight:'bold',color:'#dedeff',marginBottom:12},
+  hr:{flexDirection:'row',alignItems:'center',paddingVertical:5,gap:10}, ht:{fontSize:14,color:'#dedeff'},
+  pt:{fontSize:18,color:'#ffcc4a',fontStyle:'italic'},
+  tl:{fontSize:12,color:'#8888aa',marginBottom:3}, tt:{fontSize:16,color:'#dedeff',lineHeight:22},
+  trr:{color:'#4affaa',fontWeight:'500'}, d:{height:1,backgroundColor:'rgba(255,255,255,0.1)',marginVertical:8},
+  lr:{flexDirection:'row',alignItems:'center',gap:8},
+  ls:{flex:1,backgroundColor:'rgba(255,255,255,0.05)',borderRadius:10,padding:12},
+  ll:{fontSize:12,color:'#8888aa',marginBottom:4}, lv:{fontSize:15,color:'#dedeff',fontWeight:'500'},
+  sb:{width:44,height:44,borderRadius:22,backgroundColor:'#4a9eff',alignItems:'center',justifyContent:'center'},
+  sr:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingVertical:8},
+  hi:{paddingVertical:8,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,0.05)'},
+  ho:{fontSize:14,color:'#8888aa'}, htr:{fontSize:14,color:'#4affaa',marginTop:2},
+  over:{position:'absolute',top:0,left:0,right:0,bottom:0,backgroundColor:'rgba(0,0,0,0.7)',justifyContent:'center',alignItems:'center',zIndex:999},
+  pb:{backgroundColor:'#16213e',borderRadius:20,width:'85%',maxHeight:'70%',padding:20},
+  pt:{fontSize:18,fontWeight:'bold',color:'#dedeff',marginBottom:12,textAlign:'center'},
+  pl:{maxHeight:400}, pi:{flexDirection:'row',justifyContent:'space-between',paddingVertical:12,paddingHorizontal:8,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,0.05)'},
+  pit:{fontSize:16,color:'#dedeff'}, pic:{fontSize:12,color:'#8888aa'},
+  pc:{marginTop:12,alignItems:'center',padding:12,backgroundColor:'#4a9eff',borderRadius:10},
+  pct:{fontSize:16,color:'#fff',fontWeight:'600'},
 });
