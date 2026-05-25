@@ -28,10 +28,16 @@
         "RECORD_AUDIO",
         "INTERNET"
       ],
-      "versionCode": 24
+      "versionCode": 25
     },
     "plugins": [
       "expo-speech-recognition"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3a5f0d0a-3295-4834-bbc4-87f1eb595075"
+      }
+    },
+    "owner": "hb1237"
   }
 }
