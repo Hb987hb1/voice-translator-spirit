@@ -13,15 +13,16 @@ import {
   Switch,
   AppState,
   Dimensions,
-  NativeEventEmitter,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
-import { requireNativeModule } from 'expo-modules-core';
+import { WebView } from 'react-native-webview';
 
 // ============================================================
-// 译通翻译 v4.1
-// 使用 requireNativeModule 直接获取 native 语音模块
+// 译通翻译 v6.0
+// Web Speech API 方案 — 用内置 WebView 做语音识别
+// 因为 vivo 手机不兼容标准 Android SpeechRecognizer
+// WebView 里的 Web Speech API 在不同手机上都可用
 // ============================================================
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -47,17 +48,41 @@ async function translateText(text: string, source: string, target: string): Prom
   } catch { return text; }
 }
 
-// ---- 获取 native 语音模块 ----
-let SRModule: any = null;
-let SREvents: NativeEventEmitter | null = null;
-try {
-  SRModule = requireNativeModule('ExpoSpeechRecognition');
-  if (SRModule) {
-    SREvents = new NativeEventEmitter(SRModule);
-  }
-} catch (e) {
-  console.warn('ExpoSpeechRecognition native module not found:', e);
+const HTML_SPEECH = `<!DOCTYPE html><html><body><script>
+let recognition = null;
+let isListening = false;
+
+function startRec(lang) {
+  try {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) { window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',msg:'不支持语音识别'})); return; }
+    recognition = new SpeechRecognition();
+    recognition.lang = lang;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = function(e) {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript;
+        const isFinal = e.results[i].isFinal;
+        window.ReactNativeWebView.postMessage(JSON.stringify({type:'result',text:transcript,isFinal:isFinal}));
+      }
+    };
+    recognition.onerror = function(e) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',msg:e.error}));
+    };
+    recognition.onend = function() {
+      if (isListening) { recognition.start(); }
+    };
+    isListening = true;
+    recognition.start();
+  } catch(e) { window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',msg:e.message})); }
 }
+
+function stopRec() {
+  isListening = false;
+  if (recognition) { try { recognition.stop(); } catch{} recognition = null; }
+}
+</script></body></html>`;
 
 export default function App() {
   const [isListening, setIsListening] = useState(false);
@@ -75,19 +100,21 @@ export default function App() {
   const [showAnimal, setShowAnimal] = useState(false);
   const [animal, setAnimal] = useState('🐱');
 
+  const webRef = useRef<any>(null);
   const sLang = useRef(sourceLang);
   const tLang = useRef(targetLang);
   const speakRef = useRef(speakResult);
   const isListenRef = useRef(false);
-  const subsRef = useRef<any[]>([]);
 
   useEffect(() => { sLang.current = sourceLang; }, [sourceLang]);
   useEffect(() => { tLang.current = targetLang; }, [targetLang]);
   useEffect(() => { speakRef.current = speakResult; }, [speakResult]);
   useEffect(() => { isListenRef.current = isListening; }, [isListening]);
 
-  // 动画
+  const animalX = useRef(new Animated.Value(SCREEN_W + 50)).current;
+  const animKey = useRef(0);
   const pulse = useRef(new Animated.Value(1)).current;
+
   useEffect(() => {
     Animated.loop(Animated.sequence([
       Animated.timing(pulse, { toValue: 0.7, duration: 2000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
@@ -97,19 +124,12 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // 退出动物
-  const animalX = useRef(new Animated.Value(SCREEN_W + 50)).current;
-  const animKey = useRef(0);
   const doExitAnim = useCallback(() => {
     const a = EXIT_ANIMALS[Math.floor(Math.random() * EXIT_ANIMALS.length)];
-    setAnimal(a);
-    animKey.current++;
-    animalX.setValue(SCREEN_W + 30);
-    setShowAnimal(true);
-    Animated.timing(animalX, {
-      toValue: -120, duration: 2500 + Math.random() * 1500,
-      easing: Easing.linear, useNativeDriver: true,
-    }).start(() => setTimeout(() => setShowAnimal(false), 300));
+    setAnimal(a); animKey.current++;
+    animalX.setValue(SCREEN_W + 30); setShowAnimal(true);
+    Animated.timing(animalX, { toValue: -120, duration: 2500 + Math.random() * 1500, easing: Easing.linear, useNativeDriver: true })
+      .start(() => setTimeout(() => setShowAnimal(false), 300));
   }, []);
 
   useEffect(() => {
@@ -119,81 +139,51 @@ export default function App() {
     return () => sub.remove();
   }, []);
 
-  // ---- 语音识别 ----
-  const clearSubs = useCallback(() => {
-    subsRef.current.forEach((s: any) => { try { s.remove(); } catch {} });
-    subsRef.current = [];
+  // WebView 消息处理
+  const handleMessage = useCallback((event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'result') {
+        const text = data.text || '';
+        const isFinal = data.isFinal;
+
+        if (isFinal && text.trim()) {
+          const lower = text.trim().toLowerCase();
+          if (lower === '停' || lower === '停止') { stopListen(); return; }
+          setOriginalText(text);
+          setPartialText('');
+          setStatusText('🔍 翻译中...');
+          translateText(text, sLang.current, tLang.current).then((res) => {
+            setTranslatedText(res);
+            setStatusText('✅ 翻译完成');
+            if (speakRef.current && res && res !== text) {
+              Speech.speak(res, { language: tLang.current === 'zh-CN' ? 'zh-CN' : tLang.current, rate: 0.9 });
+            }
+            setHistory(prev => [{ id: Date.now(), original: text, translated: res, source: sLang.current, target: tLang.current, timestamp: Date.now() }, ...prev].slice(0, 50));
+          });
+        } else if (!isFinal && text.trim()) {
+          setPartialText(text);
+        }
+      } else if (data.type === 'error') {
+        console.warn('WebSpeech error:', data.msg);
+      }
+    } catch {}
   }, []);
 
   const startListen = useCallback(() => {
-    if (!SRModule || !SREvents) {
-      setStatusText('❌ 语音模块未加载');
-      return;
-    }
-
-    clearSubs();
     setIsListening(true);
     isListenRef.current = true;
     setStatusText('🔴 聆听中...说"停"停止');
-
-    // 注册事件
-    const onR = SREvents.addListener('result', (e: any) => {
-      const text = e?.results?.[0]?.transcript || '';
-      const isFinal = e?.isFinal;
-      if (isFinal && text.trim()) {
-        const lower = text.trim().toLowerCase();
-        if (lower === '停' || lower === '停止') { stopListen(); return; }
-        handleTranslate(text);
-      } else if (!isFinal && text.trim()) {
-        setPartialText(text);
-      }
-    });
-
-    const onE = SREvents.addListener('error', () => {});
-    const onEnd = SREvents.addListener('end', () => {
-      clearSubs();
-      if (isListenRef.current) {
-        setTimeout(startListen, 100);
-      }
-    });
-
-    subsRef.current = [onR, onE, onEnd];
-
-    try {
-      SRModule.start({
-        lang: sLang.current === 'auto' ? 'zh-CN' : sLang.current,
-        interimResults: true,
-        continuous: true,
-      });
-    } catch (e: any) {
-      setIsListening(false);
-      isListenRef.current = false;
-      setStatusText('❌ 启动失败');
-    }
+    const lang = sLang.current === 'auto' ? 'zh-CN' : sLang.current;
+    webRef.current?.injectJavaScript(`startRec('${lang}');true;`);
   }, []);
 
   const stopListen = useCallback(() => {
-    clearSubs();
-    try { SRModule?.stop?.(); } catch {}
-    try { SRModule?.abort?.(); } catch {}
+    webRef.current?.injectJavaScript('stopRec();true;');
     setIsListening(false);
     isListenRef.current = false;
     setPartialText('');
     setStatusText('⏹️ 已停止');
-  }, [clearSubs]);
-
-  const handleTranslate = useCallback((text: string) => {
-    setOriginalText(text);
-    setPartialText('');
-    setStatusText('🔍 翻译中...');
-    translateText(text, sLang.current, tLang.current).then((res) => {
-      setTranslatedText(res);
-      setStatusText('✅ 翻译完成');
-      if (speakRef.current && res && res !== text) {
-        Speech.speak(res, { language: tLang.current === 'zh-CN' ? 'zh-CN' : tLang.current, rate: 0.9 });
-      }
-      setHistory(prev => [{ id: Date.now(), original: text, translated: res, source: sLang.current, target: tLang.current, timestamp: Date.now() }, ...prev].slice(0, 50));
-    });
   }, []);
 
   const onMain = useCallback(() => {
@@ -209,77 +199,78 @@ export default function App() {
     if (!props.visible) return null;
     const codes = props.excludeAuto ? LANG_CODES.filter(c => c !== 'auto') : LANG_CODES;
     return (
-      <View style={s.over}><View style={s.pb}>
-        <Text style={s.pt}>选择语言</Text>
-        <ScrollView style={s.pl}>{codes.map(code => (
-          <TouchableOpacity key={code} style={s.pi} onPress={() => { props.onSelect(code); props.onClose(); }}>
-            <Text style={s.pit}>{LANGUAGES[code]}</Text><Text style={s.pic}>{code}</Text>
+      <View style={st.over}><View style={st.pb}>
+        <Text style={st.pt2}>选择语言</Text>
+        <ScrollView style={st.pl}>{codes.map(code => (
+          <TouchableOpacity key={code} style={st.pi} onPress={() => { props.onSelect(code); props.onClose(); }}>
+            <Text style={st.pit}>{LANGUAGES[code]}</Text><Text style={st.pic}>{code}</Text>
           </TouchableOpacity>
         ))}</ScrollView>
-        <TouchableOpacity style={s.pc} onPress={props.onClose}><Text style={s.pct}>关闭</Text></TouchableOpacity>
+        <TouchableOpacity style={st.pc} onPress={props.onClose}><Text style={st.pct}>关闭</Text></TouchableOpacity>
       </View></View>
     );
   };
 
   return (
-    <SafeAreaView style={s.c}>
+    <SafeAreaView style={st.c}>
       <StatusBar style="light" />
+      {/* 隐藏的 WebView 用于语音识别 */}
+      <WebView
+        ref={webRef}
+        source={{ html: HTML_SPEECH }}
+        style={{ height: 0, width: 0, opacity: 0 }}
+        onMessage={handleMessage}
+        javaScriptEnabled={true}
+        androidLayerType="hardware"
+      />
       {showAnimal && (
-        <View style={s.ao} pointerEvents="none" key={animKey.current}>
-          <Animated.View style={[s.aw, { transform: [{ translateX: animalX }] }]}>
-            <Text style={s.ae}>{animal}</Text>
+        <View style={st.ao} pointerEvents="none" key={animKey.current}>
+          <Animated.View style={[st.aw, { transform: [{ translateX: animalX }] }]}>
+            <Text style={st.ae}>{animal}</Text>
           </Animated.View>
         </View>
       )}
-      <View style={s.h}>
-        <View style={s.tr}>
-          <Animated.Text style={[s.si, { opacity: pulse, transform: [{ scale: pulse }] }]}>{spirit}</Animated.Text>
-          <View>
-            <Text style={s.t}>译通翻译</Text>
-            <Text style={s.sub}>语音翻译 · 说"停"停止</Text>
-          </View>
+      <View style={st.h}>
+        <View style={st.tr}>
+          <Animated.Text style={[st.si, { opacity: pulse, transform: [{ scale: pulse }] }]}>{spirit}</Animated.Text>
+          <View><Text style={st.t}>译通翻译</Text><Text style={st.sub}>Web Speech 语音识别</Text></View>
         </View>
-        <Text style={s.st}>{statusText}</Text>
+        <Text style={st.st}>{statusText}</Text>
       </View>
-      <ScrollView style={s.sc} contentContainerStyle={s.sci}>
-        <TouchableOpacity style={[s.b, isListening && s.ba]} onPress={onMain} activeOpacity={0.7}>
-          <Text style={s.bi}>{isListening ? '🔴' : '🎤'}</Text>
-          <Text style={s.bt}>{isListening ? '点击停止\n说"停"也可停止' : '点击开始翻译'}</Text>
+      <ScrollView style={st.sc} contentContainerStyle={st.sci}>
+        <TouchableOpacity style={[st.b, isListening && st.ba]} onPress={onMain} activeOpacity={0.7}>
+          <Text style={st.bi}>{isListening ? '🔴' : '🎤'}</Text>
+          <Text style={st.bt}>{isListening ? '点击停止\n说"停"停止' : '点击开始翻译'}</Text>
         </TouchableOpacity>
-        <View style={s.cd}><Text style={s.ct}>🎯 使用说明</Text>
-          {[['🎤','点击开始语音翻译'],['🔊','结果自动朗读'],['⏹️','说"停"停止'],['🐱','退出后小动物跑过屏幕']].map(([ico,txt],i)=>(
-            <View key={i} style={s.hr}><Text>{ico}</Text><Text style={s.ht}>{txt}</Text></View>
-          ))}
-        </View>
-        {partialText ? <View style={s.cd}><Text style={s.ct}>🎤 正在听...</Text><Text style={s.pt}>{partialText}</Text></View> : null}
+        {partialText ? <View style={st.cd}><Text style={st.ct}>🎤 正在听...</Text><Text style={st.pt}>{partialText}</Text></View> : null}
         {originalText ? (
-          <View style={s.cd}>
-            <Text style={s.ct}>📝 翻译结果</Text>
-            <View><Text style={s.tl}>原文</Text><Text style={s.tt}>{originalText}</Text></View>
-            <View style={s.d} />
-            <View><Text style={s.tl}>译文</Text><Text style={[s.tt, s.trr]}>{translatedText}</Text></View>
+          <View style={st.cd}>
+            <Text style={st.ct}>📝 翻译结果</Text>
+            <View><Text style={st.tl}>原文</Text><Text style={st.tt}>{originalText}</Text></View>
+            <View style={st.d} />
+            <View><Text style={st.tl}>译文</Text><Text style={[st.tt, st.trr]}>{translatedText}</Text></View>
           </View>
         ) : null}
-        <View style={s.cd}><Text style={s.ct}>🌐 语言设置</Text>
-          <View style={s.lr}>
-            <TouchableOpacity style={s.ls} onPress={() => setShowSourcePicker(true)}>
-              <Text style={s.ll}>源语言</Text><Text style={s.lv}>{LANGUAGES[sourceLang] || sourceLang}</Text>
+        <View style={st.cd}><Text style={st.ct}>🌐 语言</Text>
+          <View style={st.lr}>
+            <TouchableOpacity style={st.ls} onPress={() => setShowSourcePicker(true)}>
+              <Text style={st.ll}>源语言</Text><Text style={st.lv}>{LANGUAGES[sourceLang]||sourceLang}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={s.sb} onPress={swap}><Text>⇄</Text></TouchableOpacity>
-            <TouchableOpacity style={s.ls} onPress={() => setShowTargetPicker(true)}>
-              <Text style={s.ll}>目标语言</Text><Text style={s.lv}>{LANGUAGES[targetLang] || targetLang}</Text>
+            <TouchableOpacity style={st.sb} onPress={swap}><Text>⇄</Text></TouchableOpacity>
+            <TouchableOpacity style={st.ls} onPress={() => setShowTargetPicker(true)}>
+              <Text style={st.ll}>目标语言</Text><Text style={st.lv}>{LANGUAGES[targetLang]||targetLang}</Text>
             </TouchableOpacity>
           </View>
         </View>
-        <View style={s.cd}><Text style={s.ct}>⚙️ 设置</Text>
-          <View style={s.sr}><Text>朗读结果</Text>
+        <View style={st.cd}><Text style={st.ct}>⚙️ 设置</Text>
+          <View style={st.sr}><Text>朗读结果</Text>
             <Switch value={speakResult} onValueChange={setSpeakResult} trackColor={{false:'#333',true:'#4a9eff'}} thumbColor="#fff" />
           </View>
         </View>
         {history.length > 0 && (
-          <View style={s.cd}><Text style={s.ct}>📋 翻译历史</Text>
+          <View style={st.cd}><Text style={st.ct}>📋 历史</Text>
             {history.slice(0,5).map(item => (
-              <View key={item.id} style={s.hi}><Text style={s.ho} numberOfLines={1}>{item.original}</Text><Text style={s.htr} numberOfLines={1}>{item.translated}</Text></View>
+              <View key={item.id} style={st.hi}><Text style={st.ho} numberOfLines={1}>{item.original}</Text><Text style={st.htr} numberOfLines={1}>{item.translated}</Text></View>
             ))}
           </View>
         )}
@@ -290,14 +281,14 @@ export default function App() {
   );
 }
 
-const s = StyleSheet.create({
-  c:{flex:1,backgroundColor:'#1a1a2e'}, ao:{position:'absolute',top:0,left:0,right:0,bottom:0,backgroundColor:'rgba(0,0,0,0.5)',zIndex:9999},
+const st = StyleSheet.create({
+  c:{flex:1,backgroundColor:'#1a1a2e'},
+  ao:{position:'absolute',top:0,left:0,right:0,bottom:0,backgroundColor:'rgba(0,0,0,0.5)',zIndex:9999},
   aw:{position:'absolute',bottom:100}, ae:{fontSize:48},
   h:{paddingTop:Platform.OS==='android'?40:20,paddingHorizontal:20,paddingBottom:10},
   tr:{flexDirection:'row',alignItems:'center',gap:12}, si:{fontSize:40},
   t:{fontSize:24,fontWeight:'bold',color:'#dedeff'}, sub:{fontSize:13,color:'#8888aa',marginTop:2},
-  st:{fontSize:14,color:'#4a9eff',marginTop:8},
-  sc:{flex:1}, sci:{padding:16,gap:12},
+  st:{fontSize:14,color:'#4a9eff',marginTop:8}, sc:{flex:1}, sci:{padding:16,gap:12},
   b:{backgroundColor:'#222244',borderRadius:16,padding:24,alignItems:'center',borderWidth:1,borderColor:'rgba(74,158,255,0.3)'},
   ba:{borderColor:'#ff4a6a',backgroundColor:'#2a1a2e'}, bi:{fontSize:48,marginBottom:8},
   bt:{fontSize:16,color:'#dedeff',textAlign:'center',lineHeight:22},
@@ -316,8 +307,9 @@ const s = StyleSheet.create({
   ho:{fontSize:14,color:'#8888aa'}, htr:{fontSize:14,color:'#4affaa',marginTop:2},
   over:{position:'absolute',top:0,left:0,right:0,bottom:0,backgroundColor:'rgba(0,0,0,0.7)',justifyContent:'center',alignItems:'center',zIndex:999},
   pb:{backgroundColor:'#16213e',borderRadius:20,width:'85%',maxHeight:'70%',padding:20},
-  pt:{fontSize:18,fontWeight:'bold',color:'#dedeff',marginBottom:12,textAlign:'center'},
-  pl:{maxHeight:400}, pi:{flexDirection:'row',justifyContent:'space-between',paddingVertical:12,paddingHorizontal:8,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,0.05)'},
+  pt2:{fontSize:18,fontWeight:'bold',color:'#dedeff',marginBottom:12,textAlign:'center'},
+  pl:{maxHeight:400},
+  pi:{flexDirection:'row',justifyContent:'space-between',paddingVertical:12,paddingHorizontal:8,borderBottomWidth:1,borderBottomColor:'rgba(255,255,255,0.05)'},
   pit:{fontSize:16,color:'#dedeff'}, pic:{fontSize:12,color:'#8888aa'},
   pc:{marginTop:12,alignItems:'center',padding:12,backgroundColor:'#4a9eff',borderRadius:10},
   pct:{fontSize:16,color:'#fff',fontWeight:'600'},
