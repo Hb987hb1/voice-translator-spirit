@@ -10,17 +10,19 @@
   },
   "dependencies": {
     "expo": "~56.0.0",
-    "expo-speech": "~13.0.0",
-    "expo-speech-recognition": "~1.0.0",
-    "expo-file-system": "~18.0.0",
-    "expo-haptics": "~14.0.0",
-    "expo-status-bar": "~2.2.0",
-    "react": "18.3.1",
-    "react-native": "0.76.9"
+    "expo-camera": "~56.0.7",
+    "expo-file-system": "~56.0.7",
+    "expo-haptics": "~56.0.3",
+    "expo-speech": "~56.0.3",
+    "expo-speech-recognition": "^56.0.0",
+    "expo-status-bar": "~56.0.4",
+    "expo-system-ui": "~56.0.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
   },
   "devDependencies": {
-    "@types/react": "~18.3.0",
-    "typescript": "~5.3.0"
+    "@types/react": "~19.2.14",
+    "typescript": "~6.0.3"
   },
   "private": true
 }
