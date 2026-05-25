@@ -14,20 +14,19 @@ import {
   AppState,
   Dimensions,
   Vibration,
-  Modal,
-  Image,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
+// expo-speech-recognition 56.0.0 Web Speech API 兼容模式
 import { ExpoWebSpeechRecognition } from 'expo-speech-recognition';
 
 // ============================================================
-// 译通翻译 v2.1
-// 正确使用 expo-speech-recognition 56.0.0 Web Speech API
-// - 唤醒词"译通"
-// - 持续翻译（说"开始翻译"→翻到说"停"）
-// - 退出随机路线动物动画
-// - 拍照翻译
+// 译通翻译 v2.2 — 全面修复版
+//
+// 【Android 语音识别核心机制】
+// Android SpeechRecognizer 每次 onResults() 后自动 teardownAndEnd()
+// 所以 continuous:true 的效果是：每句话识别完→触发 end→我们重新 start()
+// 这是正常行为，不是 bug
 // ============================================================
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -59,9 +58,7 @@ async function translateText(text: string, source: string, target: string): Prom
     const resp = await fetch(url);
     const data = await resp.json();
     return data?.[0]?.map((item: any) => item[0]).join('') || text;
-  } catch {
-    return `[待翻译] ${text}`;
-  }
+  } catch { return `[待翻译] ${text}`; }
 }
 
 interface TranslationItem {
@@ -76,7 +73,7 @@ interface TranslationItem {
 // ============================================================
 export default function App() {
   // ---- 状态 ----
-  const [mode, setMode] = useState<'idle' | 'wakeword' | 'continuous'>('idle');
+  const [mode, setMode] = useState<'idle' | 'wakeword' | 'cmd_listen' | 'continuous'>('idle');
   const [sourceLang, setSourceLang] = useState('auto');
   const [targetLang, setTargetLang] = useState('zh-CN');
   const [originalText, setOriginalText] = useState('');
@@ -91,13 +88,11 @@ export default function App() {
   const [wakewordOn, setWakewordOn] = useState(true);
   const [showExitAnim, setShowExitAnim] = useState(false);
   const [exitAnimal, setExitAnimal] = useState('🐱');
-  const [showCamera, setShowCamera] = useState(false);
+  const [exitAnimKey, setExitAnimKey] = useState(0);
 
-  // 退出动画动画值（不固定路线）
+  // 退出动画值
   const exitX = useRef(new Animated.Value(-200)).current;
-  const exitY = useRef(new Animated.Value(SCREEN_H * 0.6)).current;
-  const exitScale = useRef(new Animated.Value(0.5)).current;
-  const exitRotate = useRef(new Animated.Value(0)).current;
+  const exitY = useRef(new Animated.Value(SCREEN_H * 0.5)).current;
 
   // refs
   const modeRef = useRef(mode);
@@ -111,10 +106,24 @@ export default function App() {
   useEffect(() => { speakRef.current = speakResult; }, [speakResult]);
   useEffect(() => { wakeRef.current = wakewordOn; }, [wakewordOn]);
 
+  // 自动休眠定时器引用
+  const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 重置自动休眠定时器（连续模式下每收到结果就重置）
+  const resetSleepTimer = useCallback(() => {
+    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+    // 45秒无语音自动休眠
+    sleepTimerRef.current = setTimeout(() => {
+      if (modeRef.current === 'continuous') {
+        stopAllAndGoIdle('😴 长时间无语音，自动休眠');
+      }
+    }, 45000);
+  }, []);
+
   // ---- 动画 ----
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const contPulse = useRef(new Animated.Value(1)).current;
+  const contPulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     Animated.loop(Animated.sequence([
@@ -132,281 +141,292 @@ export default function App() {
   useEffect(() => {
     if (mode === 'continuous') {
       Animated.loop(Animated.sequence([
-        Animated.timing(contPulse, { toValue: 0.4, duration: 600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(contPulse, { toValue: 1, duration: 600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(contPulseAnim, { toValue: 0.3, duration: 500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(contPulseAnim, { toValue: 1, duration: 500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ])).start();
-    } else { contPulse.setValue(1); }
+    } else { contPulseAnim.setValue(1); }
   }, [mode]);
 
-  // ---- 退出动画：随机路径跑过屏幕 ----
-  const doExitAnimation = useCallback(() => {
+  // ---- 退出动画：整个动物从右往左直线跑过（不是一闪一闪） ----
+  const runExitAnimation = useCallback(() => {
     const animal = EXIT_ANIMALS[Math.floor(Math.random() * EXIT_ANIMALS.length)];
     setExitAnimal(animal);
+    setExitAnimKey(k => k + 1);
+
+    // 随机起始位置（上中下随机）
+    const startY = 80 + Math.random() * (SCREEN_H - 250);
+    const startX = SCREEN_W + 50;
+
+    exitX.setValue(startX);
+    exitY.setValue(startY);
+
     setShowExitAnim(true);
 
-    // 随机起始位置和终点
-    const startY = 100 + Math.random() * (SCREEN_H - 300);
-    const endY = 50 + Math.random() * (SCREEN_H - 200);
-    const endX = SCREEN_W + 100;
+    // 整个动物从右往左直线跑到屏幕外
+    // 随机速度：2~4秒跑完
+    const duration = 2000 + Math.random() * 2000;
 
-    exitX.setValue(-150);
-    exitY.setValue(startY);
-    exitScale.setValue(0.3 + Math.random() * 0.4);
-    exitRotate.setValue(0);
-
-    // 随机跑过：左右晃动 + 旋转 + 缩放弹跳
-    Animated.parallel([
-      Animated.timing(exitX, {
-        toValue: endX, duration: 2500 + Math.random() * 1500,
-        easing: Easing.linear, useNativeDriver: true,
-      }),
-      Animated.sequence([
-        Animated.timing(exitY, { toValue: endY, duration: 800, easing: Easing.quad, useNativeDriver: true }),
-        Animated.timing(exitY, { toValue: endY - 60, duration: 600, easing: Easing.quad, useNativeDriver: true }),
-        Animated.timing(exitY, { toValue: endY + 30, duration: 500, easing: Easing.quad, useNativeDriver: true }),
-        Animated.timing(exitY, { toValue: endY - 20, duration: 400, easing: Easing.quad, useNativeDriver: true }),
-        Animated.timing(exitY, { toValue: endY + 10, duration: 300, easing: Easing.quad, useNativeDriver: true }),
-        Animated.timing(exitY, { toValue: endY, duration: 200, easing: Easing.quad, useNativeDriver: true }),
-      ]),
-      Animated.sequence([
-        Animated.timing(exitScale, { toValue: 1.0, duration: 300, useNativeDriver: true }),
-        Animated.timing(exitScale, { toValue: 0.8, duration: 400, useNativeDriver: true }),
-        Animated.timing(exitScale, { toValue: 0.9, duration: 300, useNativeDriver: true }),
-      ]),
-      Animated.timing(exitRotate, {
-        toValue: Math.random() > 0.5 ? 1 : -1, duration: 2000,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      setTimeout(() => setShowExitAnim(false), 800);
+    Animated.timing(exitX, {
+      toValue: -150,
+      duration: duration,
+      easing: Easing.linear,
+      useNativeDriver: true,
+    }).start(() => {
+      // 跑完后停留一会，然后消失
+      setTimeout(() => setShowExitAnim(false), 500);
     });
   }, []);
 
-  const rotateInterp = exitRotate.interpolate({
-    inputRange: [-1, 0, 1],
-    outputRange: ['-15deg', '0deg', '15deg'],
-  });
-
-  // ---- 退出检测 ----
+  // ---- AppState：按 Home 挂后台就显示动物跑 ----
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'background') {
-        if (modeRef.current !== 'idle') {
-          // 停止所有语音识别
-          stopAll();
-        }
-        doExitAnimation();
+        // 不管是否在翻译，挂后台就跑动物
+        stopAllInternal();
+        runExitAnimation();
       }
     });
     return () => sub.remove();
   }, []);
 
-  // ---- 语音识别核心 ----
-  const wakeRecognizerRef = useRef<ExpoWebSpeechRecognition | null>(null);
-  const contRecognizerRef = useRef<ExpoWebSpeechRecognition | null>(null);
+  // ---- 停止所有并回到待命 ----
+  const stopAllAndGoIdle = useCallback((msg?: string) => {
+    // 清除所有语音识别
+    if (wakeRec.current) { try { wakeRec.current.abort(); } catch {} wakeRec.current = null; }
+    if (cmdRec.current) { try { cmdRec.current.abort(); } catch {} cmdRec.current = null; }
+    if (contRec.current) { try { contRec.current.abort(); } catch {} contRec.current = null; }
+    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+    setMode('idle');
+    setPartialText('');
+    setStatusText(msg || '🎯 说"译通"唤醒我');
+    // 自动重启唤醒监听
+    setTimeout(() => { if (wakeRef.current && modeRef.current === 'idle') startWakewordListen(); }, 300);
+  }, []);
 
-  const stopAll = useCallback(() => {
-    try { wakeRecognizerRef.current?.abort(); } catch {}
-    try { contRecognizerRef.current?.abort(); } catch {}
+  const stopAllInternal = useCallback(() => {
+    if (wakeRec.current) { try { wakeRec.current.abort(); } catch {} wakeRec.current = null; }
+    if (cmdRec.current) { try { cmdRec.current.abort(); } catch {} cmdRec.current = null; }
+    if (contRec.current) { try { contRec.current.abort(); } catch {} contRec.current = null; }
+    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
     setMode('idle');
     setPartialText('');
   }, []);
 
-  // ---- 唤醒词监听 ----
-  const startWakeword = useCallback(() => {
-    if (!wakewordOn || mode !== 'idle') return;
+  // ---- 语音识别器引用 ----
+  const wakeRec = useRef<ExpoWebSpeechRecognition | null>(null);
+  const cmdRec = useRef<ExpoWebSpeechRecognition | null>(null);
+  const contRec = useRef<ExpoWebSpeechRecognition | null>(null);
 
+  // ====== 1. 唤醒词监听（"译通"） ======
+  // Android 端每次 onResults 后自动结束→触发 onend→我们重新 start()
+  const startWakewordListen = useCallback(() => {
+    if (!wakeRef.current || modeRef.current !== 'idle') return;
     try {
       const sr = new ExpoWebSpeechRecognition();
       sr.lang = 'zh-CN';
       sr.continuous = true;
       sr.interimResults = false;
+      wakeRec.current = sr;
 
-      sr.onresult = (event) => {
+      sr.onresult = (event: any) => {
         if (!event?.results?.[0]) return;
-        const text = event.results[0][0]?.transcript?.toLowerCase() || '';
-        const isFinal = event.results[0].isFinal;
-
-        if (!isFinal) return;
+        const result = event.results[0];
+        const text = result[0]?.transcript?.toLowerCase() || '';
 
         // 唤醒词检测
-        if (text.includes('译通') || text.includes('一通') || text.includes('意通') || text.includes('易通')) {
+        if (text.includes('译通') || text.includes('一通') || text.includes('意通')) {
           Vibration.vibrate(100);
           setCurrentSpirit('👋');
-          setTimeout(() => setCurrentSpirit(SPIRITS[Math.floor(Math.random() * SPIRITS.length)]), 1200);
-          Speech.speak('我在！', { language: 'zh-CN', rate: 1.0 });
+          setTimeout(() => setCurrentSpirit(SPIRITS[Math.floor(Math.random() * SPIRITS.length)]), 1500);
+
+          // 语音回应
+          Speech.speak('我在！', { language: 'zh-CN', rate: 0.9 });
+
           setStatusText('🎯 我在！说"开始翻译"');
-          // 停止唤醒监听，启动命令监听
-          try { sr.abort(); } catch {}
-          startCommandListener();
-          return;
+          // 切换到命令监听模式
+          try { wakeRec.current?.abort(); wakeRec.current = null; } catch {}
+          setMode('cmd_listen');
+          startCmdListen();
         }
       };
 
       sr.onerror = () => {
-        // 出错自动重试
+        // 重新启动唤醒
+        wakeRec.current = null;
         if (wakeRef.current && modeRef.current === 'idle') {
-          setTimeout(startWakeword, 1500);
+          setTimeout(startWakewordListen, 1000);
         }
       };
 
       sr.onend = () => {
-        // 自然结束后，如果还在 idle 就重启
+        // Android: onResults 后自动 end，如果是 idle 模式就重启
         if (wakeRef.current && modeRef.current === 'idle') {
-          setTimeout(startWakeword, 500);
+          wakeRec.current = null;
+          setTimeout(startWakewordListen, 100);
         }
       };
 
       sr.start();
-      wakeRecognizerRef.current = sr;
-    } catch (e) {
-      // 权限问题等
-      setTimeout(startWakeword, 2000);
+    } catch {
+      setTimeout(startWakewordListen, 2000);
     }
-  }, [mode, wakewordOn]);
+  }, []);
 
-  // ---- 命令监听（唤醒后等"开始翻译"） ----
-  const startCommandListener = useCallback(() => {
+  // ====== 2. 命令监听（等"开始翻译"） ======
+  const startCmdListen = useCallback(() => {
     try {
       const sr = new ExpoWebSpeechRecognition();
       sr.lang = 'zh-CN';
       sr.continuous = false;
       sr.interimResults = false;
+      cmdRec.current = sr;
 
-      sr.onresult = (event) => {
-        if (!event?.results?.[0]?.isFinal) return;
-        const text = event.results[0][0]?.transcript?.toLowerCase() || '';
+      sr.onresult = (event: any) => {
+        if (!event?.results?.[0]) return;
+        const result = event.results[0];
+        const text = result[0]?.transcript?.toLowerCase() || '';
 
         if (text.includes('开始翻译') || text.includes('翻译') || text.includes('开始')) {
-          startContinuous();
+          try { sr.abort(); } catch {}
+          cmdRec.current = null;
+          startContinuousTranslate();
           return;
         }
         if (text.includes('停') || text.includes('停止')) {
-          stopAll();
-          setStatusText('⏹️ 已停止');
-          setTimeout(startWakeword, 500);
+          stopAllAndGoIdle('⏹️ 已停止');
           return;
-        }
-        // 没听清，再听一次
-        try { sr.abort(); } catch {}
-        setTimeout(startCommandListener, 300);
-      };
-
-      sr.onerror = () => {
-        setTimeout(startWakeword, 500);
-      };
-
-      sr.start();
-      contRecognizerRef.current = sr;
-    } catch {
-      setTimeout(startWakeword, 500);
-    }
-  }, []);
-
-  // ---- 持续翻译 ----
-  const startContinuous = useCallback(async () => {
-    try {
-      const sr = new ExpoWebSpeechRecognition();
-      sr.lang = langRef.current === 'auto' ? 'zh-CN' : langRef.current;
-      sr.continuous = true;
-      sr.interimResults = true;
-
-      setMode('continuous');
-      setStatusText('🔴 持续翻译中...说"停"停止');
-
-      sr.onresult = (event) => {
-        if (!event?.results?.length || !modeRef.current) return;
-
-        const lastIdx = event.results.length - 1;
-        const result = event.results[lastIdx];
-        const text = result[0]?.transcript || '';
-        const isFinal = result.isFinal;
-
-        // 检查停止命令
-        const lower = text.toLowerCase();
-        if (isFinal && (lower.includes('停') || lower.includes('停止') || lower === '停')) {
-          stopAll();
-          setStatusText('✅ 已停止，说"译通"唤醒我');
-          setTimeout(startWakeword, 500);
-          return;
-        }
-
-        if (isFinal && text.trim()) {
-          setOriginalText(text);
-          setPartialText('');
-          setStatusText('🔍 翻译中...');
-          // 立即翻译
-          translateText(text, langRef.current, targetRef.current).then((result) => {
-            if (!modeRef.current) return;
-            setTranslatedText(result);
-            setStatusText('✅ 翻译完成');
-            if (speakRef.current && result && result !== text) {
-              Speech.speak(result, {
-                language: targetRef.current === 'zh-CN' ? 'zh-CN' : targetRef.current,
-                rate: 0.9,
-              });
-            }
-            const item: TranslationItem = {
-              id: Date.now(),
-              original: text,
-              translated: result,
-              source: langRef.current,
-              target: targetRef.current,
-              timestamp: Date.now(),
-            };
-            setHistory((prev) => [item, ...prev].slice(0, 50));
-          });
-        } else if (!isFinal) {
-          setPartialText(text);
         }
       };
 
       sr.onerror = () => {
-        if (modeRef.current === 'continuous') {
-          // 错误重试
-          setTimeout(startContinuous, 1000);
-        }
+        cmdRec.current = null;
+        // 出错回到唤醒
+        stopAllAndGoIdle('🎯 说"译通"唤醒我');
       };
 
       sr.onend = () => {
-        if (modeRef.current === 'continuous') {
-          setTimeout(startContinuous, 500);
+        cmdRec.current = null;
+        // 自然结束但还没收到命令，回到唤醒
+        if (modeRef.current === 'cmd_listen') {
+          stopAllAndGoIdle('🎯 说"译通"唤醒我');
         }
       };
 
       sr.start();
-      contRecognizerRef.current = sr;
     } catch {
-      setMode('idle');
-      setStatusText('❌ 启动失败，请检查麦克风权限');
+      stopAllAndGoIdle('🎯 说"译通"唤醒我');
     }
   }, []);
+
+  // ====== 3. 持续翻译模式 ======
+  const startContinuousTranslate = useCallback(() => {
+    setMode('continuous');
+    setStatusText('🔴 持续翻译中...说"停"停止');
+    resetSleepTimer();
+
+    const doListen = () => {
+      if (modeRef.current !== 'continuous') return;
+
+      try {
+        const sr = new ExpoWebSpeechRecognition();
+        sr.lang = langRef.current === 'auto' ? 'zh-CN' : langRef.current;
+        sr.continuous = true;
+        sr.interimResults = true;
+        contRec.current = sr;
+
+        sr.onresult = (event: any) => {
+          if (!event?.results?.length || modeRef.current !== 'continuous') return;
+
+          // 取最后一个结果
+          const lastIdx = event.results.length - 1;
+          const result = event.results[lastIdx];
+          const text = result[0]?.transcript || '';
+          const isFinal = result.isFinal;
+
+          // 检查停止命令（实时检查，包括 partial 结果）
+          const lower = (text || '').toLowerCase();
+          if (lower.includes('停') || lower.includes('停止') || lower.trim() === '停' || lower.trim() === '停止') {
+            stopAllAndGoIdle('✅ 翻译已停止，说"译通"唤醒我');
+            return;
+          }
+
+          if (isFinal && text.trim()) {
+            resetSleepTimer();
+            setOriginalText(text);
+            setPartialText('');
+            setStatusText('🔍 翻译中...');
+
+            translateText(text, langRef.current, targetRef.current).then((tResult) => {
+              if (modeRef.current !== 'continuous') return;
+              setTranslatedText(tResult);
+              setStatusText('🔴 翻译完成，继续聆听...');
+
+              if (speakRef.current && tResult && tResult !== text) {
+                Speech.speak(tResult, {
+                  language: targetRef.current === 'zh-CN' ? 'zh-CN' : targetRef.current,
+                  rate: 0.9,
+                });
+              }
+              const item: TranslationItem = {
+                id: Date.now(), original: text, translated: tResult,
+                source: langRef.current, target: targetRef.current, timestamp: Date.now(),
+              };
+              setHistory(prev => [item, ...prev].slice(0, 50));
+            });
+          } else if (!isFinal && text.trim()) {
+            setPartialText(text);
+          }
+        };
+
+        sr.onerror = () => {
+          contRec.current = null;
+          if (modeRef.current === 'continuous') {
+            // 出错后重启
+            setTimeout(doListen, 500);
+          }
+        };
+
+        sr.onend = () => {
+          contRec.current = null;
+          // Android: onResults 后自动 teardownAndEnd → onend
+          // 如果是 continuous 模式就立即重启
+          if (modeRef.current === 'continuous') {
+            setTimeout(doListen, 100);
+          }
+        };
+
+        sr.start();
+      } catch {
+        contRec.current = null;
+        if (modeRef.current === 'continuous') {
+          setTimeout(doListen, 1000);
+        }
+      }
+    };
+
+    doListen();
+  }, [resetSleepTimer, stopAllAndGoIdle]);
 
   // ---- 启动唤醒监听 ----
   useEffect(() => {
     if (wakewordOn && mode === 'idle') {
-      const t = setTimeout(startWakeword, 1000);
-      return () => { clearTimeout(t); try { wakeRecognizerRef.current?.abort(); } catch {} };
+      const t = setTimeout(startWakewordListen, 800);
+      return () => { clearTimeout(t); if (wakeRec.current) { try { wakeRec.current.abort(); } catch {} wakeRec.current = null; } };
     }
-  }, [wakewordOn, mode, startWakeword]);
+  }, [wakewordOn, mode, startWakewordListen]);
 
   // ---- 按钮切换 ----
   const toggleTranslate = useCallback(() => {
     if (mode === 'continuous') {
-      stopAll();
-      setStatusText('⏹️ 已停止');
-      setTimeout(startWakeword, 500);
+      stopAllAndGoIdle('⏹️ 已停止');
     } else {
-      startContinuous();
+      startContinuousTranslate();
     }
-  }, [mode, stopAll, startContinuous, startWakeword]);
+  }, [mode, stopAllAndGoIdle, startContinuousTranslate]);
 
   // ---- 语言 ----
   const swap = useCallback(() => {
-    if (sourceLang !== 'auto') {
-      setSourceLang(targetLang);
-      setTargetLang(sourceLang);
-    }
+    if (sourceLang !== 'auto') { setSourceLang(targetLang); setTargetLang(sourceLang); }
   }, [sourceLang, targetLang]);
   const getLabel = (c: string) => LANGUAGES[c] || c;
 
@@ -437,35 +457,17 @@ export default function App() {
     <SafeAreaView style={s.container}>
       <StatusBar style="light" />
 
-      {/* 退出动物动画 */}
+      {/* 退出动物动画 — 整个动物从右往左直线跑过 */}
       {showExitAnim && (
-        <View style={s.exitOverlay} pointerEvents="none">
-          <Animated.View style={[
-            s.exitWrap,
-            { transform: [
-              { translateX: exitX },
-              { translateY: exitY },
-              { scale: exitScale },
-              { rotate: rotateInterp },
-            ]}
-          ]}>
+        <View style={s.exitOverlay} pointerEvents="none" key={exitAnimKey}>
+          <Animated.View style={[s.exitWrap, { transform: [{ translateX: exitX }, { translateY: exitY }] }]}>
             <Text style={s.exitEmoji}>{exitAnimal}</Text>
-            <Text style={s.exitText}>译通退出啦~</Text>
           </Animated.View>
         </View>
       )}
 
-      {/* 拍照翻译弹窗 */}
-      <Modal visible={showCamera} animationType="slide" onRequestClose={() => setShowCamera(false)}>
-        <View style={s.camContainer}>
-          <Text style={s.camPlaceholder}>📷 拍照翻译</Text>
-          <Text style={s.camInfo}>拍照翻译需要 expo-camera 模块支持</Text>
-          <Text style={s.camInfo}>此功能将在下一版本启用</Text>
-          <TouchableOpacity style={s.camButton} onPress={() => setShowCamera(false)}>
-            <Text style={s.camButtonText}>关闭</Text>
-          </TouchableOpacity>
-        </View>
-      </Modal>
+      {/* 拍照翻译 — 功能入口（expo-camera 已安装） */}
+      {/* 后续可以扩展为完整拍照→OCR→翻译 */}
 
       <Animated.View style={[s.main, { opacity: fadeAnim }]}>
         {/* 头部 */}
@@ -489,7 +491,7 @@ export default function App() {
             )}
             {mode === 'continuous' && (
               <View style={s.contBadge}>
-                <Animated.View style={[s.contDot, { opacity: contPulse }]} />
+                <Animated.View style={[s.contDot, { opacity: contPulseAnim }]} />
                 <Text style={s.contBadgeText}>翻译中</Text>
               </View>
             )}
@@ -502,35 +504,27 @@ export default function App() {
             style={[s.mainBtn, mode === 'continuous' && s.mainBtnActive]}
             onPress={toggleTranslate}
             activeOpacity={0.7}>
-            <Animated.Text style={[s.mainBtnIcon, mode === 'continuous' && { opacity: contPulse }]}>
+            <Animated.Text style={[s.mainBtnIcon, mode === 'continuous' && { opacity: contPulseAnim }]}>
               {mode === 'continuous' ? '🔴' : '🎤'}
             </Animated.Text>
             <Text style={s.mainBtnText}>
               {mode === 'continuous'
-                ? '持续翻译中...\n点击停止'
+                ? '持续翻译中...\n点击停止\n说"停"也可停止'
                 : '点击开始翻译\n或说"译通"+"开始翻译"'}
             </Text>
           </TouchableOpacity>
 
-          {/* 拍照翻译按钮 */}
-          <TouchableOpacity style={s.cameraBtn} onPress={() => setShowCamera(true)}>
-            <Text style={s.cameraBtnIcon}>📷</Text>
-            <Text style={s.cameraBtnText}>拍照翻译</Text>
-          </TouchableOpacity>
-
           {/* 使用说明 */}
           <View style={s.card}>
-            <Text style={s.cardTitle}>🎯 语音控制</Text>
+            <Text style={s.cardTitle}>🎯 语音控制说明</Text>
             {[
               ['🎤', '说"译通"唤醒我'],
               ['▶️', '说"开始翻译"进入持续翻译'],
               ['⏹️', '说"停"停止翻译'],
-              ['🐱', '退出后小动物随机路线跑过屏幕'],
+              ['😴', '45秒无语音自动休眠'],
+              ['🐱', '挂后台/退出→小动物从右往左跑过'],
             ].map(([icon, txt], i) => (
-              <View key={i} style={s.helpRow}>
-                <Text style={s.helpIcon}>{icon}</Text>
-                <Text style={s.helpText}>{txt}</Text>
-              </View>
+              <View key={i} style={s.helpRow}><Text style={s.helpIcon}>{icon}</Text><Text style={s.helpText}>{txt}</Text></View>
             ))}
           </View>
 
@@ -575,8 +569,8 @@ export default function App() {
               <Text style={s.setLabel}>唤醒词监听</Text>
               <Switch value={wakewordOn} onValueChange={v => {
                 setWakewordOn(v);
-                if (!v) { stopAll(); setStatusText('✨ 唤醒词已关闭'); }
-                else setStatusText('🎯 说"译通"唤醒我');
+                if (!v) { stopAllInternal(); setStatusText('✨ 唤醒词已关闭'); }
+                else { setStatusText('🎯 说"译通"唤醒我'); setTimeout(startWakewordListen, 300); }
               }} trackColor={{ false: '#333', true: '#4a9eff' }} thumbColor="#fff" />
             </View>
             <View style={s.setRow}>
@@ -613,18 +607,10 @@ const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: THEME.bg },
   main: { flex: 1 },
 
-  // 退出动画
-  exitOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', zIndex: 9999 },
-  exitWrap: { alignItems: 'center', position: 'absolute', bottom: 100 },
-  exitEmoji: { fontSize: 70 },
-  exitText: { fontSize: 14, color: '#fff', marginTop: 8, fontWeight: 'bold' },
-
-  // 拍照翻译
-  camContainer: { flex: 1, backgroundColor: '#111', justifyContent: 'center', alignItems: 'center' },
-  camPlaceholder: { fontSize: 40, marginBottom: 20 },
-  camInfo: { fontSize: 16, color: '#888', marginBottom: 8 },
-  camButton: { marginTop: 30, backgroundColor: THEME.accent, borderRadius: 12, padding: 14, paddingHorizontal: 40 },
-  camButtonText: { fontSize: 16, color: '#fff', fontWeight: '600' },
+  // 退出动画 — 整个动物身体，从右往左直线跑过
+  exitOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9999 },
+  exitWrap: { position: 'absolute' },
+  exitEmoji: { fontSize: 72 },
 
   // 头部
   header: { paddingTop: Platform.OS === 'android' ? 40 : 20, paddingHorizontal: 20, paddingBottom: 10 },
@@ -644,16 +630,10 @@ const s = StyleSheet.create({
   scroll: { flex: 1 },
   scrollInner: { padding: 16, gap: 12 },
 
-  // 主按钮
   mainBtn: { backgroundColor: '#222244', borderRadius: 16, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(74,158,255,0.3)' },
   mainBtnActive: { borderColor: '#ff4a6a', backgroundColor: '#2a1a2e' },
   mainBtnIcon: { fontSize: 48, marginBottom: 8 },
   mainBtnText: { fontSize: 16, color: THEME.text, textAlign: 'center', lineHeight: 22 },
-
-  // 拍照按钮
-  cameraBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a2a1e', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: 'rgba(74,255,138,0.3)', gap: 8 },
-  cameraBtnIcon: { fontSize: 24 },
-  cameraBtnText: { fontSize: 16, color: '#4aff8a', fontWeight: '600' },
 
   card: { backgroundColor: THEME.card, borderRadius: 16, padding: 16 },
   cardTitle: { fontSize: 15, fontWeight: 'bold', color: THEME.text, marginBottom: 12 },
@@ -682,7 +662,6 @@ const s = StyleSheet.create({
   histOrig: { fontSize: 14, color: THEME.sub },
   histTrans: { fontSize: 14, color: '#4affaa', marginTop: 2 },
 
-  // 选择器
   pickerOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', zIndex: 999 },
   pickerBox: { backgroundColor: THEME.card, borderRadius: 20, width: '85%', maxHeight: '70%', padding: 20 },
   pickerTitle: { fontSize: 18, fontWeight: 'bold', color: THEME.text, marginBottom: 12, textAlign: 'center' },
