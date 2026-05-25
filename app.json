@@ -36,7 +36,7 @@
         "SYSTEM_ALERT_WINDOW",
         "FOREGROUND_SERVICE_DATA_SYNC"
       ],
-      "versionCode": 15
+      "versionCode": 17
     },
     "plugins": [
       "expo-speech-recognition"
