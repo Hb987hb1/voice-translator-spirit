@@ -1,21 +1,17 @@
 {
   "expo": {
-    "name": "语音翻译小精灵",
+    "name": "译通翻译",
     "slug": "voice-translator-spirit",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
-    "splash": {
-      "backgroundColor": "#1a1a2e"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.voicetranslator.spirit",
       "infoPlist": {
-        "NSSpeechRecognitionUsageDescription": "语音翻译小精灵需要语音识别权限来将您的语音转换为文字",
-        "NSMicrophoneUsageDescription": "语音翻译小精灵需要麦克风权限来接收您的语音输入",
+        "NSSpeechRecognitionUsageDescription": "译通翻译需要语音识别权限来将您的语音转换为文字",
+        "NSMicrophoneUsageDescription": "译通翻译需要麦克风权限来接收您的语音输入",
         "NSBluetoothAlwaysUsageDescription": "用于连接蓝牙耳机播放翻译结果"
       }
     },
@@ -35,11 +31,20 @@
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_MICROPHONE",
         "WAKE_LOCK",
-        "MODIFY_AUDIO_SETTINGS"
-      ]
+        "MODIFY_AUDIO_SETTINGS",
+        "SYSTEM_ALERT_WINDOW",
+        "FOREGROUND_SERVICE_DATA_SYNC"
+      ],
+      "versionCode": 13
     },
     "plugins": [
       "expo-speech-recognition"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3a5f0d0a-3295-4834-bbc4-87f1eb595075"
+      }
+    },
+    "owner": "hb1237"
   }
 }
